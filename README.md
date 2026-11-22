@@ -17,7 +17,6 @@ Il primo avvio potrebbe richiedere piccoli aggiustamenti.
 5. Sull'iPhone: Impostazioni > Privacy e sicurezza > Modalità sviluppatore: attiva e riavvia.
    (Collegato a Xcode, l'immagine sviluppatore viene montata da sola.)
 6. Genera il pairing: `cd engine && cargo run --release --bin make_pairing` (con iPhone collegato e sbloccato) crea ~/Desktop/pairing.plist. Mandalo al telefono con AirDrop.
-   (jkcoxson) e mandalo al telefono (AirDrop / File).
 7. Installa LocalDevVPN dall'App Store.
 
 ## Uso (solo telefono)
