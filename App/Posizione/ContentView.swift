@@ -95,14 +95,34 @@ struct ContentView: View {
     }
 
     func connect() {
-        busy = true; status = "Connessione in corso…"
+        busy = true; status = "Cerco il telefono in rete…"
         let path = pairingURL.path
-        DispatchQueue.global().async {
-            let err = Engine.connect(pairingPath: path)
-            DispatchQueue.main.async {
-                busy = false
-                if let err { status = "Errore: \(err)"; connected = false }
-                else { connected = true; status = "Connesso. Tocca la mappa e premi Imposta posizione." }
+        Task {
+            let found = await Discovery.find()
+            guard !found.isEmpty else {
+                await MainActor.run {
+                    busy = false
+                    status = "Servizio non trovato. Controlla Rete locale (Impostazioni > Posizione), Wi-Fi acceso e Modalita sviluppatore."
+                }
+                return
+            }
+            var candidates: [(String, UInt16)] = []
+            for f in found { candidates.append((f.host, f.port)); candidates.append(("10.7.0.1", f.port)) }
+            var errors: [String] = []
+            for (h, p) in candidates {
+                await MainActor.run { status = "Connessione a \(h):\(p)…" }
+                let err = await withCheckedContinuation { (c: CheckedContinuation<String?, Never>) in
+                    DispatchQueue.global().async { c.resume(returning: Engine.connectRP(pairingPath: path, host: h, port: p)) }
+                }
+                if err == nil {
+                    await MainActor.run { busy = false; connected = true; status = "Connesso. Tocca la mappa e premi Imposta posizione." }
+                    return
+                }
+                errors.append("\(h):\(p) -> \(err!)")
+            }
+            await MainActor.run {
+                busy = false; connected = false
+                status = "Errore: " + errors.joined(separator: "\n")
             }
         }
     }

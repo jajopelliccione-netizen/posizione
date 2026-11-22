@@ -7,6 +7,8 @@ use std::sync::Mutex;
 
 use idevice::{
     core_device_proxy::CoreDeviceProxy,
+    remote_pairing::{connect_tls_psk_tunnel_native, RemotePairingClient, RpPairingFile, RpPairingSocket},
+    tcp::adapter::Adapter,
     dvt::{location_simulation::LocationSimulationClient, remote_server::RemoteServerClient},
     pairing_file::PairingFile,
     provider::TcpProvider,
@@ -94,7 +96,113 @@ async fn session(
     }
 }
 
-/// Avvia la sessione. Ritorna 0 se ok, 1 se errore (vedi ll_last_error).
+
+async fn tcp_connect(host: &str, port: u16) -> Result<tokio::net::TcpStream, String> {
+    let mut last = String::from("nessun indirizzo");
+    let addrs = tokio::net::lookup_host((host, port)).await.map_err(|e| format!("{e}"))?;
+    for a in addrs {
+        match tokio::time::timeout(std::time::Duration::from_secs(8), tokio::net::TcpStream::connect(a)).await {
+            Ok(Ok(s)) => return Ok(s),
+            Ok(Err(e)) => last = format!("{a}: {e}"),
+            Err(_) => last = format!("{a}: tempo scaduto"),
+        }
+    }
+    Err(last)
+}
+
+async fn session_rp(
+    pairing_path: String,
+    host: String,
+    port: u16,
+    mut rx: mpsc::UnboundedReceiver<Cmd>,
+    ready: std::sync::mpsc::Sender<Result<(), String>>,
+) {
+    macro_rules! tryf {
+        ($e:expr, $ctx:expr) => {
+            match $e {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = ready.send(Err(format!("{}: {:?}", $ctx, e)));
+                    return;
+                }
+            }
+        };
+    }
+    let mut pf = tryf!(RpPairingFile::read_from_file(&pairing_path).await, "File rppairing");
+    let sock = tryf!(tcp_connect(&host, port).await, format!("1 Connessione a {host}:{port}"));
+    let mut client = RemotePairingClient::new(RpPairingSocket::new(sock), "posizione-host");
+    tryf!(client.attempt_pair_verify().await, "2 Handshake");
+    tryf!(client.validate_pairing(&mut pf).await, "3 Verifica abbinamento (rifai l'abbinamento?)");
+    let tport = tryf!(client.create_tcp_listener().await, "4 Creazione tunnel");
+    let stream = tryf!(tcp_connect(&host, tport).await, format!("5 Connessione al tunnel {host}:{tport}"));
+    let tunnel = tryf!(
+        connect_tls_psk_tunnel_native(stream, client.encryption_key()).await,
+        "6 TLS del tunnel"
+    );
+    let info = tunnel.info.clone();
+    let our_ip = tryf!(info.client_address.parse::<IpAddr>(), "IP client");
+    let their_ip = tryf!(info.server_address.parse::<IpAddr>(), "IP server");
+    let mut adapter = Adapter::new(Box::new(tunnel.into_inner()), our_ip, their_ip);
+    adapter.set_mss((info.mtu as usize).saturating_sub(60));
+    let mut handle = adapter.to_async_handle();
+    let rsd_stream = tryf!(handle.connect(info.server_rsd_port).await, "7 RSD");
+    let mut hs = tryf!(RsdHandshake::new(rsd_stream).await, "8 Handshake RSD");
+    let mut rs: RemoteServerClient<Box<dyn ReadWrite>> = tryf!(
+        RemoteServerClient::connect_rsd(&mut handle, &mut hs).await,
+        "9 Servizio sviluppatore"
+    );
+    tryf!(rs.read_message(0).await, "10 Lettura iniziale");
+    let mut loc = tryf!(LocationSimulationClient::new(&mut rs).await, "11 Canale posizione");
+    let _ = ready.send(Ok(()));
+    while let Some(cmd) = rx.recv().await {
+        match cmd {
+            Cmd::Set(la, lo) => {
+                if let Err(e) = loc.set(la, lo).await {
+                    set_err(format!("set: {:?}", e));
+                }
+            }
+            Cmd::Clear => {
+                if let Err(e) = loc.clear().await {
+                    set_err(format!("clear: {:?}", e));
+                }
+            }
+            Cmd::Stop => {
+                let _ = loc.clear().await;
+                break;
+            }
+        }
+    }
+}
+
+/// Connessione iOS 27 (RPPairing). host = indirizzo, port = porta del servizio _remotepairing._tcp.
+#[no_mangle]
+pub extern "C" fn ll_connect_rp(pairing_path: *const c_char, host: *const c_char, port: u16) -> i32 {
+    let path = unsafe { CStr::from_ptr(pairing_path) }.to_string_lossy().into_owned();
+    let host = unsafe { CStr::from_ptr(host) }.to_string_lossy().into_owned();
+    ll_disconnect();
+    let (tx, rx) = mpsc::unbounded_channel();
+    let (rtx, rrx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+        rt.block_on(session_rp(path, host, port, rx, rtx));
+    });
+    match rrx.recv_timeout(std::time::Duration::from_secs(40)) {
+        Ok(Ok(())) => {
+            *STATE.lock().unwrap() = Some(State { tx });
+            0
+        }
+        Ok(Err(e)) => {
+            set_err(e);
+            1
+        }
+        _ => {
+            set_err("Tempo scaduto");
+            1
+        }
+    }
+}
+
+/// Avvia la sessione (vecchio metodo, iOS <= 26). Ritorna 0 se ok, 1 se errore (vedi ll_last_error).
 #[no_mangle]
 pub extern "C" fn ll_connect(pairing_path: *const c_char) -> i32 {
     let path = unsafe { CStr::from_ptr(pairing_path) }.to_string_lossy().into_owned();
