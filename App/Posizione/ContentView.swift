@@ -67,6 +67,7 @@ struct ContentView: View {
     @State private var showSaveAlert = false
     @State private var newFavName = ""
     @FocusState private var searchFocused: Bool
+    @StateObject private var completer = SearchCompleter()
     @State private var favorites: [Favorite] = {
         guard let d = UserDefaults.standard.data(forKey: "favs"),
               let f = try? JSONDecoder().decode([Favorite].self, from: d) else { return [] }
@@ -121,6 +122,7 @@ struct ContentView: View {
             mapLayer
             VStack(spacing: 0) {
                 searchBar
+                suggestionsList
                 Spacer()
                 bottomCard
             }
@@ -156,6 +158,7 @@ struct ContentView: View {
         .onChange(of: timeMode) { syncSpeed() }
         .onChange(of: waypoints) { syncSpeed() }
         .onChange(of: runner.route?.total) { syncSpeed() }
+        .onChange(of: query) { completer.update(query) }
         .onChange(of: transport) {
             speedKmh = transport == 0 ? 5 : 40
             runner.setRoute(nil)
@@ -207,6 +210,9 @@ struct ContentView: View {
                 }
             }
             .mapControls { MapCompass() }
+            .onMapCameraChange(frequency: .onEnd) { ctx in
+                completer.region = ctx.region
+            }
             .onTapGesture { pt in
                 guard let c = proxy.convert(pt, from: .local) else { return }
                 searchFocused = false
@@ -243,6 +249,55 @@ struct ContentView: View {
     }
 
     // MARK: - Barra di ricerca
+
+    @ViewBuilder
+    private var suggestionsList: some View {
+        if searchFocused && !query.isEmpty && !completer.results.isEmpty {
+            VStack(spacing: 0) {
+                ForEach(Array(completer.results.prefix(6).enumerated()), id: \.offset) { i, c in
+                    Button { pickCompletion(c) } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: c.subtitle.isEmpty ? "magnifyingglass" : "mappin.circle.fill")
+                                .foregroundStyle(c.subtitle.isEmpty ? Color.secondary : Color.red)
+                                .frame(width: 24)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(c.title).font(.subheadline.weight(.medium))
+                                    .foregroundStyle(.primary).lineLimit(1)
+                                if !c.subtitle.isEmpty {
+                                    Text(c.subtitle).font(.caption)
+                                        .foregroundStyle(.secondary).lineLimit(1)
+                                }
+                            }
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    if i < min(completer.results.count, 6) - 1 { Divider().padding(.leading, 50) }
+                }
+            }
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .shadow(color: .black.opacity(0.15), radius: 8, y: 2)
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
+        }
+    }
+
+    func pickCompletion(_ c: MKLocalSearchCompletion) {
+        searchFocused = false
+        completer.clear()
+        MKLocalSearch(request: MKLocalSearch.Request(completion: c)).start { resp, _ in
+            guard let item = resp?.mapItems.first else { status = "Luogo non trovato"; return }
+            let coord = item.placemark.coordinate
+            let name = item.name ?? c.title
+            query = name
+            completer.clear()
+            place(coord, name: name)
+            camera = .region(MKCoordinateRegion(center: coord, span: .init(latitudeDelta: 0.01, longitudeDelta: 0.01)))
+        }
+    }
 
     private var searchBar: some View {
         HStack(spacing: 8) {
