@@ -413,16 +413,25 @@ struct ContentView: View {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: isError ? "exclamationmark.triangle.fill" : "info.circle.fill")
                     .foregroundStyle(isError ? Theme.danger : Theme.accent)
-                Text(status)
-                    .font(.footnote)
-                    .foregroundStyle(.primary)
-                    .lineLimit(5)
+                ViewThatFits(in: .vertical) {
+                    statusText
+                    ScrollView(showsIndicators: true) { statusText }
+                }
+                .frame(maxHeight: 150)
                 Spacer(minLength: 0)
             }
             .padding(10)
             .background((isError ? Theme.danger : Theme.accent).opacity(0.12),
                         in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
+    }
+
+    private var statusText: some View {
+        Text(status)
+            .font(.footnote)
+            .foregroundStyle(.primary)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Bottoni
@@ -903,6 +912,7 @@ struct ContentView: View {
             let ports: [UInt16] = await withCheckedContinuation { (c: CheckedContinuation<[UInt16], Never>) in
                 DispatchQueue.global().async { c.resume(returning: Engine.scanPorts(host: "10.7.0.1", lo: 49152, hi: 65535)) }
             }
+            errors.append("porte aperte trovate su 10.7.0.1: \(ports.count)")
             for p in ports {
                 if await attempt("10.7.0.1", p) { return clearConnectedNote() }
             }
@@ -912,7 +922,7 @@ struct ContentView: View {
                 if errors.isEmpty {
                     status = "Telefono non trovato. Controlla che LocalDevVPN sia connessa, la Modalità sviluppatore e Rete locale."
                 } else {
-                    status = "Errore: " + errors.suffix(4).joined(separator: "\n")
+                    status = "Errore:\n" + errors.joined(separator: "\n")
                 }
             }
         }
