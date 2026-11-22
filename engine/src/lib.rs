@@ -151,6 +151,124 @@ pub extern "C" fn ll_scan_ports(host: *const c_char, lo: u16, hi: u16) -> *mut c
     CString::new(text).unwrap().into_raw()
 }
 
+// ---------------------------------------------------------------------------
+// Diagnostica: scopre cosa c'e' dietro le porte aperte (servizio sviluppo, lockdown, abbinamento...)
+// ---------------------------------------------------------------------------
+
+fn show_bytes(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return "(vuoto)".into();
+    }
+    let hex: String = bytes.iter().take(24).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
+    let asc: String = bytes
+        .iter()
+        .take(48)
+        .map(|&b| if (32..127).contains(&b) { b as char } else { '.' })
+        .collect();
+    format!("{} byte: {} | {}", bytes.len(), hex, asc)
+}
+
+async fn try_probe(host: &str, port: u16, send: &[u8], wait_ms: u64) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let conn = tokio::time::timeout(
+        std::time::Duration::from_millis(1500),
+        tokio::net::TcpStream::connect((host, port)),
+    )
+    .await;
+    let mut s = match conn {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return format!("connessione: {e}"),
+        Err(_) => return "connessione: tempo scaduto".into(),
+    };
+    if !send.is_empty() {
+        if let Err(e) = s.write_all(send).await {
+            return format!("invio: {e}");
+        }
+    }
+    let mut buf = vec![0u8; 256];
+    match tokio::time::timeout(std::time::Duration::from_millis(wait_ms), s.read(&mut buf)).await {
+        Ok(Ok(0)) => "chiusa dall'altro lato (eof)".into(),
+        Ok(Ok(n)) => show_bytes(&buf[..n]),
+        Ok(Err(e)) => format!("lettura: {e}"),
+        Err(_) => "nessuna risposta".into(),
+    }
+}
+
+async fn try_rsd(host: &str, port: u16) -> String {
+    let conn = tokio::time::timeout(
+        std::time::Duration::from_millis(2000),
+        tokio::net::TcpStream::connect((host, port)),
+    )
+    .await;
+    let s = match conn {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => return format!("connessione: {e}"),
+        Err(_) => return "connessione: tempo scaduto".into(),
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(5), RsdHandshake::new(s)).await {
+        Ok(Ok(hs)) => {
+            let mut names: Vec<String> = hs.services.keys().cloned().collect();
+            names.sort();
+            let has = hs.services.contains_key("com.apple.instruments.dtservicehub");
+            format!(
+                "RSD OK: {} servizi, dtservicehub={}: {}",
+                names.len(),
+                has,
+                names.iter().take(10).cloned().collect::<Vec<_>>().join(", ")
+            )
+        }
+        Ok(Err(e)) => format!("RSD errore: {:?}", e),
+        Err(_) => "RSD: nessuna risposta".into(),
+    }
+}
+
+pub async fn probe_report(hosts: Vec<String>, ranges: Vec<(u16, u16)>) -> String {
+    let mut out = String::new();
+    let lockdown_msg = {
+        let xml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>Label</key><string>probe</string><key>Request</key><string>QueryType</string></dict></plist>";
+        let mut v = (xml.len() as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(xml.as_bytes());
+        v
+    };
+    let mut rp_msg = b"RPPairing".to_vec();
+    rp_msg.extend_from_slice(&2u16.to_be_bytes());
+    rp_msg.extend_from_slice(b"{}");
+    let mut h2_msg = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec();
+    h2_msg.extend_from_slice(&[0, 0, 0, 4, 0, 0, 0, 0, 0]);
+    let http_msg = b"GET / HTTP/1.0\r\n\r\n".to_vec();
+
+    for host in hosts {
+        out.push_str(&format!("== {host} ==\n"));
+        let mut open: Vec<u16> = Vec::new();
+        for (lo, hi) in &ranges {
+            open.extend(scan_ports(host.clone(), *lo, *hi).await);
+        }
+        open.sort();
+        open.dedup();
+        out.push_str(&format!("porte aperte: {}\n", open.len()));
+        for p in open {
+            out.push_str(&format!("-- {host}:{p}\n"));
+            out.push_str(&format!("   attesa banner : {}\n", try_probe(&host, p, &[], 800).await));
+            out.push_str(&format!("   lockdown      : {}\n", try_probe(&host, p, &lockdown_msg, 1500).await));
+            out.push_str(&format!("   rppairing     : {}\n", try_probe(&host, p, &rp_msg, 1500).await));
+            out.push_str(&format!("   http/2        : {}\n", try_probe(&host, p, &h2_msg, 1500).await));
+            out.push_str(&format!("   http/1        : {}\n", try_probe(&host, p, &http_msg, 1500).await));
+            out.push_str(&format!("   rsd (xpc)     : {}\n", try_rsd(&host, p).await));
+        }
+    }
+    out
+}
+
+/// Diagnostica: hosts separati da virgola. Ritorna un testo (da liberare con ll_free_string).
+#[no_mangle]
+pub extern "C" fn ll_probe(hosts: *const c_char) -> *mut c_char {
+    let hosts = unsafe { CStr::from_ptr(hosts) }.to_string_lossy().into_owned();
+    let list: Vec<String> = hosts.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("runtime");
+    let text = rt.block_on(probe_report(list, vec![(49152, 65535)]));
+    CString::new(text.replace('\0', " ")).unwrap().into_raw()
+}
+
 async fn tcp_connect(host: &str, port: u16) -> Result<tokio::net::TcpStream, String> {
     // Gli indirizzi IPv4 non hanno "%interfaccia" (es. 169.254.1.2%en2): lo tolgo.
     let host = if host.contains('.') && !host.contains(':') {

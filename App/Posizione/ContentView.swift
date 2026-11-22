@@ -65,6 +65,9 @@ struct ContentView: View {
     @State private var showImporter = false
     @State private var showFavorites = false
     @State private var showSaveAlert = false
+    @State private var showDiag = false
+    @State private var diagText = ""
+    @State private var diagRunning = false
     @State private var newFavName = ""
     @FocusState private var searchFocused: Bool
     @StateObject private var completer = SearchCompleter()
@@ -128,6 +131,7 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $showFavorites) { favoritesSheet }
+        .sheet(isPresented: $showDiag) { diagSheet }
         .alert("Salva preferito", isPresented: $showSaveAlert) {
             TextField("Nome del posto", text: $newFavName)
             Button("Salva") { saveFavorite() }
@@ -390,6 +394,9 @@ struct ContentView: View {
             Menu {
                 Button { showImporter = true } label: {
                     Label("Cambia pairing", systemImage: "key")
+                }
+                Button { startDiagnostics() } label: {
+                    Label("Diagnostica", systemImage: "stethoscope")
                 }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -829,6 +836,54 @@ struct ContentView: View {
             }
         }
         .presentationDetents([.medium, .large])
+    }
+
+    // MARK: - Diagnostica
+
+    private var diagSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    if diagRunning {
+                        HStack(spacing: 8) {
+                            ProgressView()
+                            Text("Sto analizzando… può volerci un paio di minuti. Tieni LocalDevVPN attiva.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                    Text(diagText)
+                        .font(.system(.caption2, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding()
+            }
+            .navigationTitle("Diagnostica")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Copia") { UIPasteboard.general.string = diagText }
+                        .disabled(diagText.isEmpty)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Chiudi") { showDiag = false }
+                }
+            }
+        }
+    }
+
+    func startDiagnostics() {
+        guard !diagRunning else { showDiag = true; return }
+        diagText = ""
+        diagRunning = true
+        showDiag = true
+        Task {
+            let text = await Diagnostics.run()
+            await MainActor.run {
+                diagText = text
+                diagRunning = false
+            }
+        }
     }
 
     // MARK: - Azioni

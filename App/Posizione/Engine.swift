@@ -20,6 +20,12 @@ enum Engine {
         let text = String(cString: p)
         return text.split(separator: ",").compactMap { UInt16($0) }
     }
+    /// Diagnostica: scansiona e interroga le porte aperte sugli host indicati (separati da virgola).
+    static func probe(hosts: String) -> String {
+        guard let p = ll_probe(hosts) else { return "" }
+        defer { ll_free_string(p) }
+        return String(cString: p)
+    }
     static func set(lat: Double, lon: Double) -> String? {
         ll_set_location(lat, lon) == 0 ? nil : lastError()
     }
