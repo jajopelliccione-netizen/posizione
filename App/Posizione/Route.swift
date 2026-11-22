@@ -89,6 +89,11 @@ enum Planner {
     }
 }
 
+enum RouteEvent {
+    case reachedStop(Int)   // arrivato a una tappa con sosta
+    case leftStop(Int)      // la sosta è finita, si riparte
+}
+
 /// Fa avanzare la posizione simulata lungo il percorso, una volta al secondo.
 @MainActor
 final class RouteRunner: ObservableObject {
@@ -106,6 +111,7 @@ final class RouteRunner: ObservableObject {
     private var nextStop = 0
     var onError: ((String) -> Void)?
     var onFinished: (() -> Void)?
+    var onEvent: ((RouteEvent) -> Void)?
     private var task: Task<Void, Never>?
 
     var progress: Double {
@@ -139,6 +145,7 @@ final class RouteRunner: ObservableObject {
                     // sosta: la posizione resta ferma
                     self.waiting = max(0, self.waiting - dt)
                     self.pushPosition()
+                    if self.waiting == 0 { self.onEvent?(.leftStop(self.nextStop - 1)) }
                     continue
                 }
                 var newTravel = min(self.traveled + self.speedMps * dt, route.total)
@@ -148,6 +155,7 @@ final class RouteRunner: ObservableObject {
                     let p = self.nextStop < self.pauses.count ? self.pauses[self.nextStop] : 0
                     self.nextStop += 1
                     self.waiting = p
+                    if p > 0 { self.onEvent?(.reachedStop(self.nextStop - 1)) }
                 }
                 self.traveled = newTravel
                 self.pushPosition()

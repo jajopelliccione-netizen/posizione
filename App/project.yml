@@ -26,6 +26,7 @@ targets:
         NSBonjourServices: ["_remotepairing._tcp", "_remotepairing-manual-pairing._tcp"]
         NSLocalNetworkUsageDescription: "Serve per parlare con il telefono stesso tramite LocalDevVPN."
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIBackgroundModes: [audio]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.jacopo.posizione

@@ -150,6 +150,18 @@ struct ContentView: View {
             runner.onFinished = {
                 appliedCoord = runner.current
                 status = "Arrivato a destinazione."
+                Notifier.post("Sei arrivato", "Percorso completato.")
+            }
+            runner.onEvent = { ev in
+                switch ev {
+                case .reachedStop(let i):
+                    guard i < waypoints.count else { return }
+                    let w = waypoints[i]
+                    Notifier.post("Sosta: \(w.name)", "Resti fermo \(formatMinutes(w.pauseMin)).")
+                case .leftStop(let i):
+                    guard i < waypoints.count else { return }
+                    Notifier.post("Si riparte", "Hai lasciato \(waypoints[i].name).")
+                }
             }
             syncSpeed()
         }
@@ -328,88 +340,200 @@ struct ContentView: View {
 
     private var bottomCard: some View {
         VStack(spacing: 12) {
+            Capsule()
+                .fill(Color.secondary.opacity(0.35))
+                .frame(width: 38, height: 5)
+                .padding(.top, 2)
+                .contentShape(Rectangle())
+                .onTapGesture { withAnimation(.snappy) { expanded.toggle() } }
+
             header
 
             if expanded {
-                if connected {
-                    Picker("Modalità", selection: $mode) {
-                        ForEach(Mode.allCases) { m in Text(m.rawValue).tag(m) }
-                    }
-                    .pickerStyle(.segmented)
-                }
-
-                if !status.isEmpty {
-                    Text(status)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .lineLimit(4)
-                }
-
+                if connected { modePicker }
+                statusBanner
                 if !hasPairing {
-                    bigButton("Importa pairing", systemImage: "square.and.arrow.down", color: .blue) {
-                        showImporter = true
-                    }
+                    primaryButton("Importa file di pairing", "square.and.arrow.down") { showImporter = true }
                 } else if !connected {
-                    bigButton(busy ? "Connessione…" : "Connetti", systemImage: "bolt.fill", color: .blue) {
-                        connect()
-                    }
-                    .disabled(busy)
+                    primaryButton(busy ? "Connessione…" : "Connetti", "bolt.fill") { connect() }
+                        .disabled(busy)
                 } else if mode == .posto {
                     postoPanel
                 } else {
                     percorsoPanel
                 }
-
-                HStack(spacing: 10) {
-                    if mode == .posto {
-                        smallButton("Salva preferito", systemImage: "star") {
-                            newFavName = pickedName
-                            showSaveAlert = true
-                        }
-                        .disabled(picked == nil)
-                    }
-                    smallButton("Cambia pairing", systemImage: "key") { showImporter = true }
-                }
             }
         }
-        .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-        .shadow(color: .black.opacity(0.2), radius: 12, y: 4)
-        .padding(.horizontal, 12)
-        .padding(.bottom, 8)
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 16)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.22), radius: 16, y: 6)
+        .padding(.horizontal, 10)
+        .padding(.bottom, 6)
     }
 
     private var header: some View {
         HStack(spacing: 8) {
-            Circle().fill(stateColor).frame(width: 10, height: 10)
-            Text(stateTitle)
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
-            Spacer(minLength: 4)
-            if mode == .posto, let c = picked {
-                Text(pickedName.isEmpty ? String(format: "%.4f, %.4f", c.latitude, c.longitude) : pickedName)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
+            HStack(spacing: 6) {
+                Circle().fill(stateColor).frame(width: 8, height: 8)
+                Text(stateTitle).font(.footnote.weight(.semibold)).lineLimit(1)
             }
-            Button { withAnimation { expanded.toggle() } } label: {
-                Image(systemName: expanded ? "chevron.down" : "chevron.up")
-                    .font(.footnote.weight(.bold))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(stateColor.opacity(0.16), in: Capsule())
+            Spacer(minLength: 4)
+            Menu {
+                Button { showImporter = true } label: {
+                    Label("Cambia pairing", systemImage: "key")
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+                    .font(.title3)
                     .foregroundStyle(.secondary)
-                    .padding(6)
             }
         }
     }
 
+    private var modePicker: some View {
+        Picker("Modalità", selection: $mode) {
+            ForEach(Mode.allCases) { m in Text(m.rawValue).tag(m) }
+        }
+        .pickerStyle(.segmented)
+    }
+
+    @ViewBuilder
+    private var statusBanner: some View {
+        if !status.isEmpty {
+            let isError = status.hasPrefix("Errore") || status.contains("non trovato")
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: isError ? "exclamationmark.triangle.fill" : "info.circle.fill")
+                    .foregroundStyle(isError ? Theme.danger : Theme.accent)
+                Text(status)
+                    .font(.footnote)
+                    .foregroundStyle(.primary)
+                    .lineLimit(5)
+                Spacer(minLength: 0)
+            }
+            .padding(10)
+            .background((isError ? Theme.danger : Theme.accent).opacity(0.12),
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+    }
+
+    // MARK: - Bottoni
+
+    private func primaryButton(_ title: String, _ icon: String,
+                               _ action: @escaping () -> Void) -> some View {
+        Button(action: action) { Label(title, systemImage: icon) }
+            .buttonStyle(FilledButtonStyle(fill: AnyShapeStyle(Theme.gradient)))
+    }
+
+    private func dangerButton(_ title: String, _ icon: String,
+                              _ action: @escaping () -> Void) -> some View {
+        Button(action: action) { Label(title, systemImage: icon) }
+            .buttonStyle(FilledButtonStyle(fill: AnyShapeStyle(Theme.danger)))
+    }
+
+    private func warnButton(_ title: String, _ icon: String,
+                            _ action: @escaping () -> Void) -> some View {
+        Button(action: action) { Label(title, systemImage: icon) }
+            .buttonStyle(FilledButtonStyle(fill: AnyShapeStyle(Theme.warn)))
+    }
+
+    private func tonalButton(_ title: String, _ icon: String,
+                             _ action: @escaping () -> Void) -> some View {
+        Button(action: action) { Label(title, systemImage: icon) }
+            .buttonStyle(TonalButtonStyle())
+    }
+
     // MARK: - Pannello Posto
 
+    func coordsText(_ c: CLLocationCoordinate2D) -> String {
+        String(format: "%.5f, %.5f", c.latitude, c.longitude)
+    }
+
     private var postoPanel: some View {
-        HStack(spacing: 10) {
-            bigButton("Imposta qui", systemImage: "location.fill", color: .blue) { apply() }
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: picked == nil ? "hand.tap.fill" : "mappin.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(picked == nil ? Color.secondary : Theme.danger)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(picked == nil ? "Scegli un posto" : (pickedName.isEmpty ? "Posizione scelta" : pickedName))
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    Text(picked == nil ? "Tocca la mappa, cerca un luogo o scegli un preferito"
+                                       : coordsText(picked ?? CLLocationCoordinate2D()))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+                Spacer(minLength: 0)
+                Button {
+                    newFavName = pickedName
+                    showSaveAlert = true
+                } label: {
+                    Image(systemName: "star.circle.fill")
+                        .font(.title)
+                        .foregroundStyle(.yellow)
+                }
+                .buttonStyle(.plain)
                 .disabled(picked == nil)
-            bigButton("Posizione reale", systemImage: "location.slash.fill", color: .red) { stop() }
+                .opacity(picked == nil ? 0.35 : 1)
+            }
+            .panel()
+
+            favoritesStrip
+
+            HStack(spacing: 10) {
+                primaryButton("Imposta qui", "location.fill") { apply() }
+                    .disabled(picked == nil)
+                dangerButton("Posizione reale", "location.slash.fill") { stop() }
+            }
+        }
+    }
+
+    /// Fascia con i preferiti salvati, sempre visibile sotto la scelta del posto.
+    private var favoritesStrip: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label("Preferiti", systemImage: "star.fill")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if !favorites.isEmpty {
+                    Button("Gestisci") { showFavorites = true }
+                        .font(.footnote.weight(.semibold))
+                }
+            }
+            if favorites.isEmpty {
+                Text("Nessun preferito. Scegli un posto e tocca la stella gialla per salvarlo qui.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(favorites) { f in
+                            Button { select(f) } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "star.fill").font(.caption2).foregroundStyle(.yellow)
+                                    Text(f.name).font(.footnote.weight(.medium)).lineLimit(1)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.primary.opacity(0.08), in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -420,132 +544,170 @@ struct ContentView: View {
             percorsoContent
             ScrollView(showsIndicators: false) { percorsoContent }
         }
-        .frame(maxHeight: 330)
+        .frame(maxHeight: 360)
     }
 
     private var percorsoContent: some View {
         VStack(spacing: 10) {
-            Picker("Mezzo", selection: $transport) {
-                Label("A piedi", systemImage: "figure.walk").tag(0)
-                Label("In auto", systemImage: "car.fill").tag(1)
-            }
-            .pickerStyle(.segmented)
-            .disabled(runner.running)
+            VStack(spacing: 10) {
+                Picker("Mezzo", selection: $transport) {
+                    Label("A piedi", systemImage: "figure.walk").tag(0)
+                    Label("In auto", systemImage: "car.fill").tag(1)
+                }
+                .pickerStyle(.segmented)
+                .disabled(runner.running)
 
-            HStack(spacing: 6) {
-                targetChip("Partenza", systemImage: "figure.walk", color: .green,
-                           set: routeStart != nil, selected: tapTarget == .start) { tapTarget = .start }
-                targetChip("Tappa", systemImage: "plus.circle", color: .orange,
-                           set: false, selected: tapTarget == .stop) { tapTarget = .stop }
-                targetChip("Arrivo", systemImage: "flag.checkered", color: .red,
-                           set: routeEnd != nil, selected: tapTarget == .end) { tapTarget = .end }
-            }
+                HStack(spacing: 6) {
+                    targetChip("Partenza", systemImage: "figure.walk", color: .green,
+                               set: routeStart != nil, selected: tapTarget == .start) { tapTarget = .start }
+                    targetChip("Tappa", systemImage: "plus.circle", color: .orange,
+                               set: false, selected: tapTarget == .stop) { tapTarget = .stop }
+                    targetChip("Arrivo", systemImage: "flag.checkered", color: .red,
+                               set: routeEnd != nil, selected: tapTarget == .end) { tapTarget = .end }
+                }
 
-            if tapTarget == .stop && waypoints.isEmpty {
-                Text("Tocca la mappa (o cerca un luogo) per aggiungere una tappa.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            if routeStart == nil && appliedCoord != nil && !runner.running {
-                Text("Partenza non scelta: uso la posizione attuale.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            ForEach($waypoints) { $w in
-                HStack(spacing: 8) {
-                    Image(systemName: "pause.circle.fill").foregroundStyle(.orange)
-                    Text(w.name).font(.footnote).lineLimit(1)
-                    Spacer(minLength: 4)
-                    Stepper(value: $w.pauseMin, in: 0...180, step: 1) {
-                        Text(String(format: "%.0f min", w.pauseMin))
-                            .font(.footnote.monospacedDigit())
-                    }
-                    .fixedSize()
-                    Button {
-                        removeWaypoint(w.id)
-                    } label: {
-                        Image(systemName: "trash").font(.footnote).foregroundStyle(.red)
-                    }
-                    .disabled(runner.running)
+                if tapTarget == .stop && waypoints.isEmpty {
+                    hint("Tocca la mappa o cerca un luogo per aggiungere una tappa.")
+                } else if routeStart == nil && appliedCoord != nil && !runner.running {
+                    hint("Partenza non scelta: uso la posizione attuale.")
                 }
             }
+            .panel()
 
-            Picker("Tempo", selection: $timeMode) {
-                ForEach(TimeMode.allCases) { m in Text(m.rawValue).tag(m) }
-            }
-            .pickerStyle(.segmented)
-
-            switch timeMode {
-            case .stima:
-                Text("Il tempo di marcia lo stima Mappe in base al percorso.")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            case .velocita:
-                HStack {
-                    Text("Velocità").font(.subheadline)
-                    Spacer()
-                    Text(String(format: "%.0f km/h", speedKmh)).font(.subheadline.monospacedDigit())
+            if !waypoints.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach($waypoints) { $w in
+                        waypointRow($w)
+                        if w.id != waypoints.last?.id { Divider() }
+                    }
                 }
-                Slider(value: $speedKmh, in: speedRange, step: 1)
-            case .durata:
-                HStack {
-                    Text("Durata totale (soste incluse)").font(.subheadline)
-                    Spacer()
-                    Text(formatMinutes(durationMin)).font(.subheadline.monospacedDigit())
-                }
-                Slider(value: $durationMin, in: 1...480, step: 1)
-                if let r = runner.route, r.total > 0, durationMin * 60 <= totalPauseSec + 30 {
-                    Text("Durata troppo corta per le soste: riducile o aumenta il tempo.")
-                        .font(.caption).foregroundStyle(.orange)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else if runner.route != nil {
-                    Text(String(format: "Velocità necessaria: %.1f km/h", shownKmh))
-                        .font(.caption).foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                .panel()
             }
 
-            if let r = runner.route {
-                let moving = r.total / max(speedMps, 0.1)
-                VStack(spacing: 6) {
-                    HStack {
-                        Text(formatDistance(r.total))
-                        Spacer()
-                        Text("Totale: " + formatDuration(moving + totalPauseSec))
-                    }
-                    .font(.subheadline.weight(.medium))
-                    if totalPauseSec > 0 {
-                        HStack {
-                            Text("Cammino " + formatDuration(moving))
-                            Spacer()
-                            Text("Soste " + formatDuration(totalPauseSec))
-                        }
-                        .font(.caption).foregroundStyle(.secondary)
-                    }
-                    if r.isStraightLine {
-                        Text("Per qualche tratto non ho trovato strade: uso la linea retta.")
-                            .font(.caption).foregroundStyle(.orange)
+            VStack(spacing: 10) {
+                Picker("Tempo", selection: $timeMode) {
+                    ForEach(TimeMode.allCases) { m in Text(m.rawValue).tag(m) }
+                }
+                .pickerStyle(.segmented)
+
+                switch timeMode {
+                case .stima:
+                    hint("Il tempo di cammino lo stima Mappe in base al percorso.")
+                case .velocita:
+                    sliderRow("Velocità", String(format: "%.0f km/h", speedKmh))
+                    Slider(value: $speedKmh, in: speedRange, step: 1)
+                case .durata:
+                    sliderRow("Durata totale, soste incluse", formatMinutes(durationMin))
+                    Slider(value: $durationMin, in: 1...480, step: 1)
+                    if let r = runner.route, r.total > 0, durationMin * 60 <= totalPauseSec + 30 {
+                        Text("Durata troppo corta per le soste: riducile o aumenta il tempo.")
+                            .font(.caption).foregroundStyle(Theme.warn)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    if runner.traveled > 0 {
-                        ProgressView(value: runner.progress)
-                        if runner.waiting > 0 {
-                            Text("In sosta: ancora " + formatDuration(runner.waiting))
-                                .font(.caption.weight(.semibold)).foregroundStyle(.orange)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        } else {
-                            Text("Mancano " + formatDistance(max(r.total - runner.traveled, 0)))
-                                .font(.caption).foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
                 }
+            }
+            .panel()
+
+            if let r = runner.route {
+                summary(r)
             }
 
             routeButtons
         }
+    }
+
+    private func hint(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func sliderRow(_ title: String, _ value: String) -> some View {
+        HStack {
+            Text(title).font(.subheadline)
+            Spacer()
+            Text(value).font(.subheadline.weight(.semibold).monospacedDigit())
+        }
+    }
+
+    private func tile(_ value: String, _ label: String) -> some View {
+        VStack(spacing: 2) {
+            Text(value)
+                .font(.subheadline.weight(.bold).monospacedDigit())
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Text(label).font(.caption2).foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
+        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    @ViewBuilder
+    private func summary(_ r: PlannedRoute) -> some View {
+        let moving = r.total / max(speedMps, 0.1)
+        VStack(spacing: 8) {
+            HStack(spacing: 8) {
+                tile(formatDistance(r.total), "Distanza")
+                tile(formatDuration(moving + totalPauseSec), "Totale")
+                tile(String(format: "%.1f km/h", shownKmh), "Velocità")
+            }
+            if totalPauseSec > 0 {
+                hint("Cammino " + formatDuration(moving) + "  ·  Soste " + formatDuration(totalPauseSec))
+            }
+            if r.isStraightLine {
+                Text("Per qualche tratto non ho trovato strade: uso la linea retta.")
+                    .font(.caption).foregroundStyle(Theme.warn)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            if runner.traveled > 0 {
+                ProgressView(value: runner.progress).tint(Theme.accent)
+                if runner.waiting > 0 {
+                    Text("In sosta: ancora " + formatDuration(runner.waiting))
+                        .font(.caption.weight(.semibold)).foregroundStyle(Theme.warn)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    hint("Mancano " + formatDistance(max(r.total - runner.traveled, 0)))
+                }
+            }
+        }
+    }
+
+    private func stepPause(_ v: Double, up: Bool) -> Double {
+        let step: Double = v >= 10 ? 5 : 1
+        return up ? min(180, v + step) : max(0, v - step)
+    }
+
+    private func waypointRow(_ w: Binding<Waypoint>) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "pause.circle.fill").foregroundStyle(Theme.warn)
+            Text(w.wrappedValue.name)
+                .font(.footnote.weight(.medium))
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            HStack(spacing: 4) {
+                Button { w.wrappedValue.pauseMin = stepPause(w.wrappedValue.pauseMin, up: false) } label: {
+                    Image(systemName: "minus.circle.fill")
+                }
+                Text(String(format: "%.0f min", w.wrappedValue.pauseMin))
+                    .font(.footnote.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(.primary)
+                    .frame(minWidth: 50)
+                Button { w.wrappedValue.pauseMin = stepPause(w.wrappedValue.pauseMin, up: true) } label: {
+                    Image(systemName: "plus.circle.fill")
+                }
+            }
+            .font(.title3)
+            .foregroundStyle(Theme.accent)
+            .buttonStyle(.plain)
+            Button { removeWaypoint(w.wrappedValue.id) } label: {
+                Image(systemName: "trash").font(.footnote).foregroundStyle(Theme.danger)
+            }
+            .buttonStyle(.plain)
+            .disabled(runner.running)
+        }
+        .padding(.vertical, 6)
     }
 
     func removeWaypoint(_ id: UUID) {
@@ -561,28 +723,27 @@ struct ContentView: View {
     @ViewBuilder
     private var routeButtons: some View {
         if runner.route == nil {
-            bigButton(planning ? "Calcolo…" : "Calcola percorso",
-                      systemImage: "point.topleft.down.to.point.bottomright.curvepath.fill",
-                      color: .blue) {
+            primaryButton(planning ? "Calcolo…" : "Calcola percorso",
+                          "point.topleft.down.to.point.bottomright.curvepath.fill") {
                 computeRoute()
             }
             .disabled(planning || routeEnd == nil || (routeStart == nil && appliedCoord == nil))
         } else {
             HStack(spacing: 10) {
                 if runner.running {
-                    bigButton("Pausa", systemImage: "pause.fill", color: .orange) {
+                    warnButton("Pausa", "pause.fill") {
                         runner.pause()
                         appliedCoord = runner.current
                     }
                 } else {
-                    bigButton(runner.traveled > 0 ? "Riprendi" : "Avvia", systemImage: "play.fill", color: .blue) {
+                    primaryButton(runner.traveled > 0 ? "Riprendi" : "Avvia", "play.fill") {
                         startRoute()
                     }
                 }
-                bigButton("Posizione reale", systemImage: "location.slash.fill", color: .red) { stop() }
+                dangerButton("Posizione reale", "location.slash.fill") { stop() }
             }
             if !runner.running && runner.traveled > 0 {
-                smallButton("Ricomincia", systemImage: "arrow.counterclockwise") {
+                tonalButton("Ricomincia", "arrow.counterclockwise") {
                     let r = runner.route
                     runner.setRoute(r)
                 }
@@ -599,8 +760,8 @@ struct ContentView: View {
                 Text(title).font(.footnote.weight(.semibold)).lineLimit(1)
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 9)
-            .background(selected ? color.opacity(0.22) : Color.secondary.opacity(0.12),
+            .padding(.vertical, 10)
+            .background(selected ? color.opacity(0.20) : Color.primary.opacity(0.06),
                         in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
@@ -609,36 +770,6 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .disabled(runner.running)
-    }
-
-    // MARK: - Bottoni
-
-    private func bigButton(_ title: String, systemImage: String, color: Color,
-                           action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-                .frame(maxWidth: .infinity)
-                .frame(height: 48)
-                .background(color, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                .foregroundStyle(.white)
-        }
-    }
-
-    private func smallButton(_ title: String, systemImage: String,
-                             action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .font(.footnote.weight(.medium))
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                .frame(maxWidth: .infinity)
-                .frame(height: 38)
-                .background(Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-        .buttonStyle(.plain)
     }
 
     // MARK: - Preferiti
@@ -650,38 +781,41 @@ struct ContentView: View {
                     VStack(spacing: 10) {
                         Image(systemName: "star").font(.system(size: 44)).foregroundStyle(.secondary)
                         Text("Nessun preferito").font(.headline)
-                        Text("Scegli un posto sulla mappa e premi Salva preferito.")
+                        Text("Scegli un posto sulla mappa e tocca la stella gialla per salvarlo qui.")
                             .font(.subheadline).foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
                     }
                     .padding(32)
                 } else {
                     List {
-                        ForEach(favorites) { f in
-                            Button { select(f) } label: {
-                                HStack(spacing: 12) {
-                                    Image(systemName: "star.fill").foregroundStyle(.yellow)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(f.name).font(.body).foregroundStyle(.primary)
-                                        Text(String(format: "%.4f, %.4f", f.lat, f.lon))
-                                            .font(.caption.monospaced()).foregroundStyle(.secondary)
+                        Section {
+                            ForEach(favorites) { f in
+                                Button { select(f) } label: {
+                                    HStack(spacing: 12) {
+                                        Image(systemName: "star.fill").foregroundStyle(.yellow)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(f.name).font(.body).foregroundStyle(.primary)
+                                            Text(String(format: "%.4f, %.4f", f.lat, f.lon))
+                                                .font(.caption.monospaced()).foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
                                     }
-                                    Spacer()
-                                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
                                 }
                             }
-                        }
-                        .onDelete { idx in
-                            favorites.remove(atOffsets: idx)
-                            persist()
+                            .onDelete { idx in
+                                favorites.remove(atOffsets: idx)
+                                persist()
+                            }
+                        } footer: {
+                            Text("I preferiti sono salvati su questo iPhone, dentro l'app. Scorri a sinistra per eliminarli.")
                         }
                     }
                 }
             }
-            .navigationTitle("Preferiti")
+            .navigationTitle("Preferiti salvati")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) { if !favorites.isEmpty { EditButton() } }
                 ToolbarItem(placement: .topBarTrailing) { Button("Chiudi") { showFavorites = false } }
             }
         }
@@ -743,7 +877,7 @@ struct ContentView: View {
                     DispatchQueue.global().async { c.resume(returning: Engine.connectRP(pairingPath: path, host: h, port: p)) }
                 }
                 if err == nil {
-                    await MainActor.run { busy = false; connected = true; status = "" }
+                    await MainActor.run { busy = false; connected = true; status = ""; KeepAlive.shared.start() }
                     return
                 }
                 errors.append("\(h):\(p) -> \(err!)")
@@ -768,6 +902,7 @@ struct ContentView: View {
     func stop() {
         runner.setRoute(runner.route)
         Engine.clear(); Engine.disconnect()
+        KeepAlive.shared.stop()
         connected = false; simulating = false
         appliedCoord = nil
         status = "Posizione reale ripristinata."
@@ -793,6 +928,7 @@ struct ContentView: View {
 
     func startRoute() {
         syncSpeed()
+        Notifier.requestAuth()
         simulating = true
         status = ""
         runner.start()
