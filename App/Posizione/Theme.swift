@@ -15,10 +15,10 @@ struct FilledButtonStyle: ButtonStyle {
     var fill: AnyShapeStyle
 
     func makeBody(configuration: Configuration) -> some View {
-        Body(configuration: configuration, fill: fill)
+        FilledBody(configuration: configuration, fill: fill)
     }
 
-    struct Body: View {
+    struct FilledBody: View {
         let configuration: ButtonStyleConfiguration
         let fill: AnyShapeStyle
         @Environment(\.isEnabled) private var isEnabled
