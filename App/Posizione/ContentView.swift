@@ -877,7 +877,7 @@ struct ContentView: View {
                     DispatchQueue.global().async { c.resume(returning: Engine.connectRP(pairingPath: path, host: h, port: p)) }
                 }
                 if err == nil {
-                    await MainActor.run { busy = false; connected = true; status = ""; KeepAlive.shared.start() }
+                    await MainActor.run { busy = false; connected = true; status = ""; KeepAlive.shared.start(); RealLocation.shared.requestPermission() }
                     return
                 }
                 errors.append("\(h):\(p) -> \(err!)")
@@ -903,9 +903,10 @@ struct ContentView: View {
         runner.setRoute(runner.route)
         Engine.clear(); Engine.disconnect()
         KeepAlive.shared.stop()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { RealLocation.shared.refresh() }
         connected = false; simulating = false
         appliedCoord = nil
-        status = "Posizione reale ripristinata."
+        status = "Posizione reale ripristinata. Il GPS può metterci qualche secondo a ritrovarti."
     }
 
     func computeRoute() {

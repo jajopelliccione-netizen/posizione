@@ -24,6 +24,7 @@ targets:
         CFBundleDisplayName: Posizione
         UILaunchScreen: {}
         NSBonjourServices: ["_remotepairing._tcp", "_remotepairing-manual-pairing._tcp"]
+        NSLocationWhenInUseUsageDescription: "Serve a ritrovare in fretta la tua posizione vera quando fermi la simulazione."
         NSLocalNetworkUsageDescription: "Serve per parlare con il telefono stesso tramite LocalDevVPN."
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIBackgroundModes: [audio]
