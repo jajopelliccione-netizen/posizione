@@ -37,7 +37,10 @@ enum Discovery {
                 case .ready:
                     if case let .hostPort(host, port)? = conn.currentPath?.remoteEndpoint {
                         var h = "\(host)"
-                        if let i = h.firstIndex(of: "%"), h.hasPrefix("fe80") { _ = i } // tengo la zona (es. %en0)
+                        // IPv4: niente "%interfaccia". IPv6: la tengo (serve per fe80::...%en0).
+                        if h.contains("."), !h.contains(":"), let i = h.firstIndex(of: "%") {
+                            h = String(h[h.startIndex..<i])
+                        }
                         finish(Found(host: h, port: port.rawValue))
                     } else { finish(nil) }
                 case .failed, .cancelled: finish(nil)

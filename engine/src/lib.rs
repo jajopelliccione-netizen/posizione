@@ -152,6 +152,12 @@ pub extern "C" fn ll_scan_ports(host: *const c_char, lo: u16, hi: u16) -> *mut c
 }
 
 async fn tcp_connect(host: &str, port: u16) -> Result<tokio::net::TcpStream, String> {
+    // Gli indirizzi IPv4 non hanno "%interfaccia" (es. 169.254.1.2%en2): lo tolgo.
+    let host = if host.contains('.') && !host.contains(':') {
+        host.split('%').next().unwrap_or(host)
+    } else {
+        host
+    };
     let mut last = String::from("nessun indirizzo");
     let addrs = tokio::net::lookup_host((host, port)).await.map_err(|e| format!("{e}"))?;
     for a in addrs {
