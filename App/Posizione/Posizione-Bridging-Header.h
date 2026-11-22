@@ -6,3 +6,4 @@ void ll_disconnect(void);
 char *ll_last_error(void);
 void ll_free_string(char *p);
 int32_t ll_connect_rp(const char *pairing_path, const char *host, uint16_t port);
+char *ll_scan_ports(const char *host, uint16_t lo, uint16_t hi);

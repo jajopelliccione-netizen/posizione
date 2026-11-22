@@ -97,6 +97,60 @@ async fn session(
 }
 
 
+
+async fn with_timeout<T, F>(secs: u64, f: F) -> Result<T, String>
+where
+    F: std::future::Future<Output = Result<T, idevice::IdeviceError>>,
+{
+    match tokio::time::timeout(std::time::Duration::from_secs(secs), f).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(format!("{:?}", e)),
+        Err(_) => Err("nessuna risposta".to_string()),
+    }
+}
+
+async fn scan_ports(host: String, lo: u16, hi: u16) -> Vec<u16> {
+    use tokio::task::JoinSet;
+    let mut open: Vec<u16> = Vec::new();
+    let mut port = lo as u32;
+    while port <= hi as u32 {
+        let end = (port + 128).min(hi as u32 + 1);
+        let mut set = JoinSet::new();
+        for p in port..end {
+            let h = host.clone();
+            set.spawn(async move {
+                let r = tokio::time::timeout(
+                    std::time::Duration::from_millis(250),
+                    tokio::net::TcpStream::connect((h.as_str(), p as u16)),
+                )
+                .await;
+                if let Ok(Ok(_s)) = r { Some(p as u16) } else { None }
+            });
+        }
+        while let Some(res) = set.join_next().await {
+            if let Ok(Some(p)) = res {
+                open.push(p);
+            }
+        }
+        port = end;
+    }
+    open.sort();
+    open
+}
+
+/// Cerca le porte TCP aperte su `host` tra lo e hi. Ritorna "p1,p2,..." (da liberare con ll_free_string).
+#[no_mangle]
+pub extern "C" fn ll_scan_ports(host: *const c_char, lo: u16, hi: u16) -> *mut c_char {
+    let host = unsafe { CStr::from_ptr(host) }.to_string_lossy().into_owned();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let ports = rt.block_on(scan_ports(host, lo, hi));
+    let text = ports.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(",");
+    CString::new(text).unwrap().into_raw()
+}
+
 async fn tcp_connect(host: &str, port: u16) -> Result<tokio::net::TcpStream, String> {
     let mut last = String::from("nessun indirizzo");
     let addrs = tokio::net::lookup_host((host, port)).await.map_err(|e| format!("{e}"))?;
@@ -131,9 +185,9 @@ async fn session_rp(
     let mut pf = tryf!(RpPairingFile::read_from_file(&pairing_path).await, "File rppairing");
     let sock = tryf!(tcp_connect(&host, port).await, format!("1 Connessione a {host}:{port}"));
     let mut client = RemotePairingClient::new(RpPairingSocket::new(sock), "posizione-host");
-    tryf!(client.attempt_pair_verify().await, "2 Handshake");
-    tryf!(client.validate_pairing(&mut pf).await, "3 Verifica abbinamento (rifai l'abbinamento?)");
-    let tport = tryf!(client.create_tcp_listener().await, "4 Creazione tunnel");
+    tryf!(with_timeout(6, client.attempt_pair_verify()).await, "2 Handshake");
+    tryf!(with_timeout(6, client.validate_pairing(&mut pf)).await, "3 Verifica abbinamento");
+    let tport = tryf!(with_timeout(6, client.create_tcp_listener()).await, "4 Creazione tunnel");
     let stream = tryf!(tcp_connect(&host, tport).await, format!("5 Connessione al tunnel {host}:{tport}"));
     let tunnel = tryf!(
         connect_tls_psk_tunnel_native(stream, client.encryption_key()).await,

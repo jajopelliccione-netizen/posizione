@@ -857,41 +857,71 @@ struct ContentView: View {
     }
 
     func connect() {
-        busy = true; status = "Cerco il telefono in rete…"
+        busy = true; status = "Cerco il telefono…"
         let path = pairingURL.path
         Task {
+            // 1) Indirizzi già noti: prima la VPN locale (non dipende dal Wi-Fi), poi quello trovato in rete.
             let found = await Discovery.find()
             var candidates: [(String, UInt16)] = []
-            for f in found { candidates.append((f.host, f.port)); candidates.append(("10.7.0.1", f.port)) }
-            // Ultimo indirizzo che ha funzionato: utile quando la ricerca in rete non trova nulla (es. solo dati cellulare).
+            for f in found { candidates.append(("10.7.0.1", f.port)); candidates.append((f.host, f.port)) }
             if let last = loadLastEndpoint() {
-                candidates.append(last)
                 candidates.append(("10.7.0.1", last.1))
+                candidates.append(last)
             }
-            guard !candidates.isEmpty else {
-                await MainActor.run {
-                    busy = false
-                    status = "Telefono non trovato. Collega il Wi-Fi (anche senza internet) e controlla Rete locale e Modalità sviluppatore."
-                }
-                return
-            }
+            var tried = Set<String>()
             var errors: [String] = []
-            for (h, p) in candidates {
-                await MainActor.run { status = "Connessione a \(h):\(p)…" }
+
+            func attempt(_ h: String, _ p: UInt16) async -> Bool {
+                let key = "\(h):\(p)"
+                if tried.contains(key) { return false }
+                tried.insert(key)
+                await MainActor.run { status = "Connessione a \(key)…" }
                 let err = await withCheckedContinuation { (c: CheckedContinuation<String?, Never>) in
                     DispatchQueue.global().async { c.resume(returning: Engine.connectRP(pairingPath: path, host: h, port: p)) }
                 }
-                if err == nil {
-                    saveLastEndpoint(h, p)
-                    await MainActor.run { busy = false; connected = true; status = ""; KeepAlive.shared.start(); RealLocation.shared.requestPermission() }
-                    return
+                if let err {
+                    errors.append("\(key) -> \(err)")
+                    return false
                 }
-                errors.append("\(h):\(p) -> \(err!)")
+                saveLastEndpoint(h, p)
+                await MainActor.run {
+                    busy = false
+                    connected = true
+                    status = "Connesso (\(key))"
+                    KeepAlive.shared.start()
+                    RealLocation.shared.requestPermission()
+                }
+                return true
             }
+
+            for (h, p) in candidates {
+                if await attempt(h, p) { return clearConnectedNote() }
+            }
+
+            // 2) Niente Wi-Fi o porta cambiata: cerco io la porta sulla VPN locale.
+            await MainActor.run { status = "Cerco la porta sul telefono (può volerci un minuto)…" }
+            let ports: [UInt16] = await withCheckedContinuation { (c: CheckedContinuation<[UInt16], Never>) in
+                DispatchQueue.global().async { c.resume(returning: Engine.scanPorts(host: "10.7.0.1", lo: 49152, hi: 65535)) }
+            }
+            for p in ports {
+                if await attempt("10.7.0.1", p) { return clearConnectedNote() }
+            }
+
             await MainActor.run {
                 busy = false; connected = false
-                status = "Errore: " + errors.joined(separator: "\n")
+                if errors.isEmpty {
+                    status = "Telefono non trovato. Controlla che LocalDevVPN sia connessa, la Modalità sviluppatore e Rete locale."
+                } else {
+                    status = "Errore: " + errors.suffix(4).joined(separator: "\n")
+                }
             }
+        }
+    }
+
+    /// Toglie dopo qualche secondo la riga "Connesso (indirizzo)".
+    func clearConnectedNote() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6) {
+            if status.hasPrefix("Connesso (") { status = "" }
         }
     }
 
