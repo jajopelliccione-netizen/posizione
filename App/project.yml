@@ -25,4 +25,4 @@ targets:
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.example.posizione
+        PRODUCT_BUNDLE_IDENTIFIER: com.jacopo.posizione
