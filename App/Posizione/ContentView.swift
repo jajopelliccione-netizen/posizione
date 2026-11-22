@@ -861,15 +861,20 @@ struct ContentView: View {
         let path = pairingURL.path
         Task {
             let found = await Discovery.find()
-            guard !found.isEmpty else {
+            var candidates: [(String, UInt16)] = []
+            for f in found { candidates.append((f.host, f.port)); candidates.append(("10.7.0.1", f.port)) }
+            // Ultimo indirizzo che ha funzionato: utile quando la ricerca in rete non trova nulla (es. solo dati cellulare).
+            if let last = loadLastEndpoint() {
+                candidates.append(last)
+                candidates.append(("10.7.0.1", last.1))
+            }
+            guard !candidates.isEmpty else {
                 await MainActor.run {
                     busy = false
-                    status = "Telefono non trovato. Controlla Rete locale, Wi-Fi e Modalità sviluppatore."
+                    status = "Telefono non trovato. Collega il Wi-Fi (anche senza internet) e controlla Rete locale e Modalità sviluppatore."
                 }
                 return
             }
-            var candidates: [(String, UInt16)] = []
-            for f in found { candidates.append((f.host, f.port)); candidates.append(("10.7.0.1", f.port)) }
             var errors: [String] = []
             for (h, p) in candidates {
                 await MainActor.run { status = "Connessione a \(h):\(p)…" }
@@ -877,6 +882,7 @@ struct ContentView: View {
                     DispatchQueue.global().async { c.resume(returning: Engine.connectRP(pairingPath: path, host: h, port: p)) }
                 }
                 if err == nil {
+                    saveLastEndpoint(h, p)
                     await MainActor.run { busy = false; connected = true; status = ""; KeepAlive.shared.start(); RealLocation.shared.requestPermission() }
                     return
                 }
@@ -887,6 +893,18 @@ struct ContentView: View {
                 status = "Errore: " + errors.joined(separator: "\n")
             }
         }
+    }
+
+    func saveLastEndpoint(_ host: String, _ port: UInt16) {
+        UserDefaults.standard.set(host, forKey: "lastHost")
+        UserDefaults.standard.set(Int(port), forKey: "lastPort")
+    }
+
+    func loadLastEndpoint() -> (String, UInt16)? {
+        guard let h = UserDefaults.standard.string(forKey: "lastHost") else { return nil }
+        let p = UserDefaults.standard.integer(forKey: "lastPort")
+        guard p > 0 && p < 65536 else { return nil }
+        return (h, UInt16(p))
     }
 
     func apply() {
