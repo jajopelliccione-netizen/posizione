@@ -6,12 +6,18 @@ struct PlannedRoute {
     var coords: [CLLocationCoordinate2D]
     var cumulative: [Double]
     var isStraightLine = false
+    /// Distanza (m dalla partenza) di ogni tappa intermedia.
+    var stopDistances: [Double] = []
+    /// Tempo di percorrenza stimato da Mappe, in secondi (senza soste).
+    var expectedTime: Double = 0
 
     var total: Double { cumulative.last ?? 0 }
 
-    init(coords: [CLLocationCoordinate2D], isStraightLine: Bool = false) {
+    init(coords: [CLLocationCoordinate2D], stopIndices: [Int] = [], expectedTime: Double = 0,
+         isStraightLine: Bool = false) {
         self.coords = coords
         self.isStraightLine = isStraightLine
+        self.expectedTime = expectedTime
         var cum: [Double] = [0]
         if coords.count > 1 {
             for i in 1..<coords.count {
@@ -21,6 +27,7 @@ struct PlannedRoute {
             }
         }
         self.cumulative = cum
+        self.stopDistances = stopIndices.map { $0 < cum.count ? cum[$0] : (cum.last ?? 0) }
     }
 
     /// Posizione dopo aver percorso `d` metri.
@@ -40,23 +47,45 @@ struct PlannedRoute {
 }
 
 enum Planner {
-    /// Calcola il percorso con Mappe. Se non esiste (es. mare) usa la linea retta.
-    static func plan(from: CLLocationCoordinate2D, to: CLLocationCoordinate2D, walking: Bool) async -> PlannedRoute {
-        let req = MKDirections.Request()
-        req.source = MKMapItem(placemark: MKPlacemark(coordinate: from))
-        req.destination = MKMapItem(placemark: MKPlacemark(coordinate: to))
-        req.transportType = walking ? .walking : .automobile
-        do {
-            let resp = try await MKDirections(request: req).calculate()
-            if let route = resp.routes.first {
+    /// Calcola il percorso passando per tutti i punti (partenza, tappe, arrivo).
+    /// Per ogni tratto senza strada usa la linea retta.
+    static func plan(points: [CLLocationCoordinate2D], walking: Bool) async -> PlannedRoute {
+        var all: [CLLocationCoordinate2D] = []
+        var stopIndices: [Int] = []
+        var expected = 0.0
+        var straight = false
+        let fallbackSpeed = walking ? 1.4 : 11.0
+
+        for i in 0..<max(points.count - 1, 0) {
+            let from = points[i]
+            let to = points[i + 1]
+            var leg: [CLLocationCoordinate2D] = []
+            var legTime = 0.0
+
+            let req = MKDirections.Request()
+            req.source = MKMapItem(placemark: MKPlacemark(coordinate: from))
+            req.destination = MKMapItem(placemark: MKPlacemark(coordinate: to))
+            req.transportType = walking ? .walking : .automobile
+            if let resp = try? await MKDirections(request: req).calculate(),
+               let route = resp.routes.first, route.polyline.pointCount > 1 {
                 let n = route.polyline.pointCount
                 let pts = route.polyline.points()
-                var coords: [CLLocationCoordinate2D] = []
-                for i in 0..<n { coords.append(pts[i].coordinate) }
-                if coords.count > 1 { return PlannedRoute(coords: coords) }
+                for k in 0..<n { leg.append(pts[k].coordinate) }
+                legTime = route.expectedTravelTime
+            } else {
+                leg = [from, to]
+                straight = true
+                let d = CLLocation(latitude: from.latitude, longitude: from.longitude)
+                    .distance(from: CLLocation(latitude: to.latitude, longitude: to.longitude))
+                legTime = d / fallbackSpeed
             }
-        } catch {}
-        return PlannedRoute(coords: [from, to], isStraightLine: true)
+            if all.isEmpty { all = leg } else { all.append(contentsOf: leg.dropFirst()) }
+            expected += legTime
+            if i < points.count - 2 { stopIndices.append(all.count - 1) }
+        }
+        if all.count < 2, let f = points.first { all = [f, f] }
+        return PlannedRoute(coords: all, stopIndices: stopIndices, expectedTime: expected,
+                            isStraightLine: straight)
     }
 }
 
@@ -67,9 +96,14 @@ final class RouteRunner: ObservableObject {
     @Published var traveled: Double = 0
     @Published var running = false
     @Published var current: CLLocationCoordinate2D?
+    /// Secondi di sosta rimasti (0 = in movimento).
+    @Published var waiting: Double = 0
 
     /// Velocita in metri al secondo (aggiornata dalla schermata).
     var speedMps: Double = 1.4
+    /// Durata (secondi) della sosta in ogni tappa, nello stesso ordine delle tappe.
+    var pauses: [Double] = []
+    private var nextStop = 0
     var onError: ((String) -> Void)?
     var onFinished: (() -> Void)?
     private var task: Task<Void, Never>?
@@ -84,11 +118,13 @@ final class RouteRunner: ObservableObject {
         route = r
         traveled = 0
         current = nil
+        waiting = 0
+        nextStop = 0
     }
 
     func start() {
         guard let route, !running else { return }
-        if traveled >= route.total { traveled = 0 }
+        if traveled >= route.total { traveled = 0; nextStop = 0; waiting = 0 }
         running = true
         pushPosition()
         task = Task { [weak self] in
@@ -99,7 +135,21 @@ final class RouteRunner: ObservableObject {
                 let now = Date()
                 let dt = now.timeIntervalSince(last)
                 last = now
-                self.traveled = min(self.traveled + self.speedMps * dt, route.total)
+                if self.waiting > 0 {
+                    // sosta: la posizione resta ferma
+                    self.waiting = max(0, self.waiting - dt)
+                    self.pushPosition()
+                    continue
+                }
+                var newTravel = min(self.traveled + self.speedMps * dt, route.total)
+                if self.nextStop < route.stopDistances.count,
+                   newTravel >= route.stopDistances[self.nextStop] {
+                    newTravel = route.stopDistances[self.nextStop]
+                    let p = self.nextStop < self.pauses.count ? self.pauses[self.nextStop] : 0
+                    self.nextStop += 1
+                    self.waiting = p
+                }
+                self.traveled = newTravel
                 self.pushPosition()
                 if self.traveled >= route.total {
                     self.running = false

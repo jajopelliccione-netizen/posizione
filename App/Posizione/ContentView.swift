@@ -15,7 +15,23 @@ enum Mode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-enum TapTarget { case start, end }
+enum TapTarget { case start, stop, end }
+
+enum TimeMode: String, CaseIterable, Identifiable {
+    case stima = "Stima"
+    case velocita = "Velocità"
+    case durata = "Durata"
+    var id: String { rawValue }
+}
+
+struct Waypoint: Identifiable, Equatable {
+    var id = UUID()
+    var lat: Double
+    var lon: Double
+    var name: String
+    var pauseMin: Double = 5
+    var coordinate: CLLocationCoordinate2D { CLLocationCoordinate2D(latitude: lat, longitude: lon) }
+}
 
 struct ContentView: View {
     @StateObject private var runner = RouteRunner()
@@ -35,7 +51,8 @@ struct ContentView: View {
     @State private var routeEnd: CLLocationCoordinate2D?
     @State private var tapTarget: TapTarget = .end
     @State private var transport = 0            // 0 = a piedi, 1 = in auto
-    @State private var useDuration = false
+    @State private var timeMode: TimeMode = .stima
+    @State private var waypoints: [Waypoint] = []
     @State private var speedKmh: Double = 5
     @State private var durationMin: Double = 20
     @State private var planning = false
@@ -69,17 +86,32 @@ struct ContentView: View {
         return .gray
     }
     private var stateTitle: String {
+        if runner.running && runner.waiting > 0 { return "In sosta" }
         if runner.running { return "In movimento" }
         if simulating { return "Simulazione attiva" }
         if connected { return "Connesso" }
         return "Non connesso"
     }
 
+    private var totalPauseSec: Double { waypoints.reduce(0) { $0 + $1.pauseMin * 60 } }
+
+    private var defaultMps: Double { transport == 0 ? 1.4 : 11.0 }
+
+    /// Velocità di marcia (m/s) in base alla modalità scelta.
     private var speedMps: Double {
-        if useDuration, let r = runner.route, r.total > 0 {
-            return r.total / max(durationMin * 60, 1)
+        switch timeMode {
+        case .velocita:
+            return max(speedKmh / 3.6, 0.1)
+        case .stima:
+            if let r = runner.route, r.total > 0, r.expectedTime > 1 { return r.total / r.expectedTime }
+            return defaultMps
+        case .durata:
+            if let r = runner.route, r.total > 0 {
+                let moving = max(durationMin * 60 - totalPauseSec, 30)
+                return r.total / moving
+            }
+            return defaultMps
         }
-        return max(speedKmh / 3.6, 0.1)
     }
     private var shownKmh: Double { speedMps * 3.6 }
     private var speedRange: ClosedRange<Double> { transport == 0 ? 1...15 : 5...130 }
@@ -121,7 +153,8 @@ struct ContentView: View {
         }
         .onChange(of: speedKmh) { syncSpeed() }
         .onChange(of: durationMin) { syncSpeed() }
-        .onChange(of: useDuration) { syncSpeed() }
+        .onChange(of: timeMode) { syncSpeed() }
+        .onChange(of: waypoints) { syncSpeed() }
         .onChange(of: runner.route?.total) { syncSpeed() }
         .onChange(of: transport) {
             speedKmh = transport == 0 ? 5 : 40
@@ -129,7 +162,10 @@ struct ContentView: View {
         }
     }
 
-    func syncSpeed() { runner.speedMps = speedMps }
+    func syncSpeed() {
+        runner.speedMps = speedMps
+        runner.pauses = waypoints.map { $0.pauseMin * 60 }
+    }
 
     // MARK: - Mappa
 
@@ -151,6 +187,10 @@ struct ContentView: View {
                     }
                     if let s = routeStart {
                         Marker("Partenza", systemImage: "figure.walk", coordinate: s).tint(.green)
+                    }
+                    ForEach(Array(waypoints.enumerated()), id: \.element.id) { i, w in
+                        Marker("\(i + 1). \(w.name)", systemImage: "pause.circle.fill", coordinate: w.coordinate)
+                            .tint(.orange)
                     }
                     if let e = routeEnd {
                         Marker("Arrivo", systemImage: "flag.checkered", coordinate: e).tint(.red)
@@ -177,19 +217,29 @@ struct ContentView: View {
     }
 
     func mapTapped(_ c: CLLocationCoordinate2D) {
+        if mode == .percorso && runner.running { return }
+        place(c, name: "")
+    }
+
+    /// Usa un punto (tocco sulla mappa, ricerca o preferito) secondo la modalità attuale.
+    func place(_ c: CLLocationCoordinate2D, name: String) {
         if mode == .posto {
             picked = c
-            pickedName = ""
-        } else {
-            guard !runner.running else { return }
-            if tapTarget == .start {
-                routeStart = c
-                tapTarget = .end
-            } else {
-                routeEnd = c
-            }
-            runner.setRoute(nil)
+            pickedName = name
+            return
         }
+        guard !runner.running else { return }
+        switch tapTarget {
+        case .start:
+            routeStart = c
+            tapTarget = .end
+        case .end:
+            routeEnd = c
+        case .stop:
+            let label = name.isEmpty ? "Tappa \(waypoints.count + 1)" : name
+            waypoints.append(Waypoint(lat: c.latitude, lon: c.longitude, name: label))
+        }
+        runner.setRoute(nil)
     }
 
     // MARK: - Barra di ricerca
@@ -311,6 +361,14 @@ struct ContentView: View {
     // MARK: - Pannello Percorso
 
     private var percorsoPanel: some View {
+        ViewThatFits(in: .vertical) {
+            percorsoContent
+            ScrollView(showsIndicators: false) { percorsoContent }
+        }
+        .frame(maxHeight: 330)
+    }
+
+    private var percorsoContent: some View {
         VStack(spacing: 10) {
             Picker("Mezzo", selection: $transport) {
                 Label("A piedi", systemImage: "figure.walk").tag(0)
@@ -319,11 +377,19 @@ struct ContentView: View {
             .pickerStyle(.segmented)
             .disabled(runner.running)
 
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 targetChip("Partenza", systemImage: "figure.walk", color: .green,
                            set: routeStart != nil, selected: tapTarget == .start) { tapTarget = .start }
+                targetChip("Tappa", systemImage: "plus.circle", color: .orange,
+                           set: false, selected: tapTarget == .stop) { tapTarget = .stop }
                 targetChip("Arrivo", systemImage: "flag.checkered", color: .red,
                            set: routeEnd != nil, selected: tapTarget == .end) { tapTarget = .end }
+            }
+
+            if tapTarget == .stop && waypoints.isEmpty {
+                Text("Tocca la mappa (o cerca un luogo) per aggiungere una tappa.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             if routeStart == nil && appliedCoord != nil && !runner.running {
@@ -332,55 +398,93 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            Picker("Imposta", selection: $useDuration) {
-                Text("Velocità").tag(false)
-                Text("Durata").tag(true)
+            ForEach($waypoints) { $w in
+                HStack(spacing: 8) {
+                    Image(systemName: "pause.circle.fill").foregroundStyle(.orange)
+                    Text(w.name).font(.footnote).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Stepper(value: $w.pauseMin, in: 0...180, step: 1) {
+                        Text(String(format: "%.0f min", w.pauseMin))
+                            .font(.footnote.monospacedDigit())
+                    }
+                    .fixedSize()
+                    Button {
+                        removeWaypoint(w.id)
+                    } label: {
+                        Image(systemName: "trash").font(.footnote).foregroundStyle(.red)
+                    }
+                    .disabled(runner.running)
+                }
+            }
+
+            Picker("Tempo", selection: $timeMode) {
+                ForEach(TimeMode.allCases) { m in Text(m.rawValue).tag(m) }
             }
             .pickerStyle(.segmented)
 
-            if useDuration {
-                HStack {
-                    Text("Durata").font(.subheadline)
-                    Spacer()
-                    Text(String(format: "%.0f min", durationMin)).font(.subheadline.monospacedDigit())
-                }
-                Slider(value: $durationMin, in: 1...240, step: 1)
-                if runner.route != nil {
-                    Text(String(format: "Velocità necessaria: %.1f km/h", shownKmh))
-                        .font(.caption).foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    Text("Calcola il percorso per vedere la velocità.")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            } else {
+            switch timeMode {
+            case .stima:
+                Text("Il tempo di marcia lo stima Mappe in base al percorso.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            case .velocita:
                 HStack {
                     Text("Velocità").font(.subheadline)
                     Spacer()
                     Text(String(format: "%.0f km/h", speedKmh)).font(.subheadline.monospacedDigit())
                 }
                 Slider(value: $speedKmh, in: speedRange, step: 1)
+            case .durata:
+                HStack {
+                    Text("Durata totale (soste incluse)").font(.subheadline)
+                    Spacer()
+                    Text(formatMinutes(durationMin)).font(.subheadline.monospacedDigit())
+                }
+                Slider(value: $durationMin, in: 1...480, step: 1)
+                if let r = runner.route, r.total > 0, durationMin * 60 <= totalPauseSec + 30 {
+                    Text("Durata troppo corta per le soste: riducile o aumenta il tempo.")
+                        .font(.caption).foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else if runner.route != nil {
+                    Text(String(format: "Velocità necessaria: %.1f km/h", shownKmh))
+                        .font(.caption).foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
 
             if let r = runner.route {
+                let moving = r.total / max(speedMps, 0.1)
                 VStack(spacing: 6) {
                     HStack {
                         Text(formatDistance(r.total))
                         Spacer()
-                        Text("Tempo: " + formatDuration(r.total / max(speedMps, 0.1)))
+                        Text("Totale: " + formatDuration(moving + totalPauseSec))
                     }
                     .font(.subheadline.weight(.medium))
+                    if totalPauseSec > 0 {
+                        HStack {
+                            Text("Cammino " + formatDuration(moving))
+                            Spacer()
+                            Text("Soste " + formatDuration(totalPauseSec))
+                        }
+                        .font(.caption).foregroundStyle(.secondary)
+                    }
                     if r.isStraightLine {
-                        Text("Nessuna strada trovata: uso la linea retta.")
+                        Text("Per qualche tratto non ho trovato strade: uso la linea retta.")
                             .font(.caption).foregroundStyle(.orange)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     if runner.traveled > 0 {
                         ProgressView(value: runner.progress)
-                        Text("Mancano " + formatDistance(max(r.total - runner.traveled, 0)))
-                            .font(.caption).foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if runner.waiting > 0 {
+                            Text("In sosta: ancora " + formatDuration(runner.waiting))
+                                .font(.caption.weight(.semibold)).foregroundStyle(.orange)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            Text("Mancano " + formatDistance(max(r.total - runner.traveled, 0)))
+                                .font(.caption).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                 }
             }
@@ -389,34 +493,14 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder
-    private var routeButtons: some View {
-        if runner.route == nil {
-            bigButton(planning ? "Calcolo…" : "Calcola percorso", systemImage: "point.topleft.down.to.point.bottomright.curvepath.fill", color: .blue) {
-                computeRoute()
-            }
-            .disabled(planning || routeEnd == nil || (routeStart == nil && appliedCoord == nil))
-        } else {
-            HStack(spacing: 10) {
-                if runner.running {
-                    bigButton("Pausa", systemImage: "pause.fill", color: .orange) {
-                        runner.pause()
-                        appliedCoord = runner.current
-                    }
-                } else {
-                    bigButton(runner.traveled > 0 ? "Riprendi" : "Avvia", systemImage: "play.fill", color: .blue) {
-                        startRoute()
-                    }
-                }
-                bigButton("Posizione reale", systemImage: "location.slash.fill", color: .red) { stop() }
-            }
-            if !runner.running && runner.traveled > 0 {
-                smallButton("Ricomincia", systemImage: "arrow.counterclockwise") {
-                    let r = runner.route
-                    runner.setRoute(r)
-                }
-            }
-        }
+    func removeWaypoint(_ id: UUID) {
+        waypoints.removeAll { $0.id == id }
+        runner.setRoute(nil)
+    }
+
+    func formatMinutes(_ m: Double) -> String {
+        let t = Int(m)
+        return t >= 60 ? "\(t / 60) h \(t % 60) min" : "\(t) min"
     }
 
     private func targetChip(_ title: String, systemImage: String, color: Color,
@@ -520,17 +604,7 @@ struct ContentView: View {
     // MARK: - Azioni
 
     func select(_ f: Favorite) {
-        if mode == .posto {
-            picked = f.coordinate
-            pickedName = f.name
-        } else if tapTarget == .start {
-            routeStart = f.coordinate
-            tapTarget = .end
-            runner.setRoute(nil)
-        } else {
-            routeEnd = f.coordinate
-            runner.setRoute(nil)
-        }
+        place(f.coordinate, name: f.name)
         camera = .region(MKCoordinateRegion(center: f.coordinate,
                                             span: .init(latitudeDelta: 0.05, longitudeDelta: 0.05)))
         showFavorites = false
@@ -556,18 +630,7 @@ struct ContentView: View {
         MKLocalSearch(request: req).start { resp, _ in
             guard let item = resp?.mapItems.first else { status = "Nessun risultato"; return }
             let c = item.placemark.coordinate
-            let name = item.name ?? query
-            if mode == .posto {
-                picked = c
-                pickedName = name
-            } else if tapTarget == .start {
-                routeStart = c
-                tapTarget = .end
-                runner.setRoute(nil)
-            } else {
-                routeEnd = c
-                runner.setRoute(nil)
-            }
+            place(c, name: item.name ?? query)
             camera = .region(MKCoordinateRegion(center: c, span: .init(latitudeDelta: 0.05, longitudeDelta: 0.05)))
         }
     }
@@ -628,8 +691,11 @@ struct ContentView: View {
         planning = true
         status = ""
         let walking = transport == 0
+        var points: [CLLocationCoordinate2D] = [start]
+        points.append(contentsOf: waypoints.map { $0.coordinate })
+        points.append(end)
         Task {
-            let r = await Planner.plan(from: start, to: end, walking: walking)
+            let r = await Planner.plan(points: points, walking: walking)
             await MainActor.run {
                 runner.setRoute(r)
                 planning = false
