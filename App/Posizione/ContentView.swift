@@ -503,6 +503,38 @@ struct ContentView: View {
         return t >= 60 ? "\(t / 60) h \(t % 60) min" : "\(t) min"
     }
 
+    @ViewBuilder
+    private var routeButtons: some View {
+        if runner.route == nil {
+            bigButton(planning ? "Calcolo…" : "Calcola percorso",
+                      systemImage: "point.topleft.down.to.point.bottomright.curvepath.fill",
+                      color: .blue) {
+                computeRoute()
+            }
+            .disabled(planning || routeEnd == nil || (routeStart == nil && appliedCoord == nil))
+        } else {
+            HStack(spacing: 10) {
+                if runner.running {
+                    bigButton("Pausa", systemImage: "pause.fill", color: .orange) {
+                        runner.pause()
+                        appliedCoord = runner.current
+                    }
+                } else {
+                    bigButton(runner.traveled > 0 ? "Riprendi" : "Avvia", systemImage: "play.fill", color: .blue) {
+                        startRoute()
+                    }
+                }
+                bigButton("Posizione reale", systemImage: "location.slash.fill", color: .red) { stop() }
+            }
+            if !runner.running && runner.traveled > 0 {
+                smallButton("Ricomincia", systemImage: "arrow.counterclockwise") {
+                    let r = runner.route
+                    runner.setRoute(r)
+                }
+            }
+        }
+    }
+
     private func targetChip(_ title: String, systemImage: String, color: Color,
                             set: Bool, selected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
